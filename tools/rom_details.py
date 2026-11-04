@@ -22,6 +22,18 @@ from nvidia_vbios.rom import load, inspect_image
 from nvidia_vbios.rom.memory import memory_report
 
 
+# Known reference hardware clock specifications for enterprise / datacenter GPUs
+# where factory_rated_boost_mhz is not in consumer table B1.
+KNOWN_GPU_SPECS = {
+    ('10DE', '1DF6'): {'base_mhz': 1245, 'boost_mhz': 1597, 'mem_mhz': 1107, 'mem_size': '32768 MB', 'model': 'Tesla V100s'},
+    ('10DE', '1DB6'): {'base_mhz': 1230, 'boost_mhz': 1380, 'mem_mhz': 876,  'mem_size': '32768 MB', 'model': 'Tesla V100'},
+    ('10DE', '1DB4'): {'base_mhz': 1290, 'boost_mhz': 1530, 'mem_mhz': 876,  'mem_size': '16384 MB', 'model': 'Tesla V100 SXM2'},
+    ('10DE', '1DB5'): {'base_mhz': 1290, 'boost_mhz': 1530, 'mem_mhz': 876,  'mem_size': '32768 MB', 'model': 'Tesla V100 SXM2'},
+    ('10DE', '1D81'): {'base_mhz': 1200, 'boost_mhz': 1455, 'mem_mhz': 850,  'mem_size': '12288 MB', 'model': 'TITAN V'},
+    ('10DE', '1D91'): {'base_mhz': 1132, 'boost_mhz': 1627, 'mem_mhz': 848,  'mem_size': '32768 MB', 'model': 'Quadro GV100'},
+}
+
+
 def extract_subsystem_id(data):
     """Extract Subsystem Vendor & Device ID from NVGI header (offset 0x0c) or NPDE header."""
     if data[:4] == b'NVGI' and len(data) >= 0x10:
@@ -99,6 +111,9 @@ def generate_rom_markdown(rom_path):
     device_id_str = f"{pci_parts[0]} {pci_parts[1]}" if len(pci_parts) == 2 else pci_dev_raw
     subsystem_str = extract_subsystem_id(data) or "Unknown"
 
+    gpu_dev_key = (pci_parts[0], pci_parts[1]) if len(pci_parts) == 2 else None
+    spec = KNOWN_GPU_SPECS.get(gpu_dev_key, {})
+
     # Board power limit calculation
     field_map = {f['key']: f for f in info.get('fields', [])}
     p_def = field_map.get('power_default_w', {}).get('current')
@@ -131,31 +146,40 @@ def generate_rom_markdown(rom_path):
                                .replace('-16GB', '')
                                .replace('100S', '100s')
                                .strip())
+    if not short_model or short_model == 'Unknown':
+        short_model = spec.get('model', 'Unknown')
 
     # Detect memory size and type
-    mem_size = ''
-    for token, sz in [('32GB', '32768 MB'), ('32768', '32768 MB'),
-                      ('16GB', '16384 MB'), ('16384', '16384 MB'),
-                      ('24GB', '24576 MB'), ('12GB', '12288 MB'),
-                      ('8GB', '8192 MB'), ('6GB', '6144 MB')]:
-        if token in product_name:
-            mem_size = sz
-            break
+    mem_size = spec.get('mem_size', '')
+    if not mem_size:
+        for token, sz in [('32GB', '32768 MB'), ('32768', '32768 MB'),
+                          ('16GB', '16384 MB'), ('16384', '16384 MB'),
+                          ('24GB', '24576 MB'), ('12GB', '12288 MB'),
+                          ('8GB', '8192 MB'), ('6GB', '6144 MB')]:
+            if token in product_name:
+                mem_size = sz
+                break
 
     mem_type = mem_support[0][0] if mem_support else 'Unknown'
 
-    # Clocks if available
+    # Clocks
     clocks_lines = []
-    gpc_boost = field_map.get('factory_rated_boost_mhz', {}).get('current')
-    hbm2_target = field_map.get('hbm2_target_mhz', {}).get('current')
+    base_clock = spec.get('base_mhz')
+    gpc_boost = field_map.get('factory_rated_boost_mhz', {}).get('current') or spec.get('boost_mhz')
+    hbm2_target = field_map.get('hbm2_target_mhz', {}).get('current') or spec.get('mem_mhz')
+
+    if base_clock:
+        clocks_lines.append(f"GPU Clock:\t*{base_clock} MHz*")
     if gpc_boost:
         clocks_lines.append(f"Boost Clock:\t*{gpc_boost} MHz*")
     if hbm2_target:
         clocks_lines.append(f"Memory Clock:\t*{hbm2_target} MHz*")
 
     # Assemble Document
+    title_suffix = f" {mem_size}" if mem_size else ""
+    title_name = f"NVIDIA {short_model}{title_suffix}" if short_model != 'Unknown' else product_name
     doc = [
-        f"# VGA BIOS {product_name} BIOS",
+        f"# VGA BIOS {title_name} BIOS",
         "",
         "**VBIOS Info**",
         f"Filename:\t{filename}",
@@ -223,8 +247,8 @@ def main():
         out_path = Path(args.output)
         out_path.write_text(md, encoding="utf-8")
         print(f"Wrote details to: {out_path}")
-    elif not args.stdout and not sys.stdout.isatty():
-        sys.stdout.write(md)
+    elif args.stdout or not sys.stdout.isatty():
+        sys.stdout.write(md + "\n")
     else:
         out_path = Path(str(args.rom) + ".md")
         out_path.write_text(md, encoding="utf-8")
